@@ -1,0 +1,153 @@
+trigger:
+ branches:
+   include:
+     - main
+
+pr:
+ branches:
+   include:
+     - main
+
+name: $(Date:yyyyMMdd).$(Rev:r)
+
+variables:
+- group: vg-java-prod
+
+stages:
+
+##############################################
+# BUILD STAGE
+##############################################
+
+- stage: Build
+ displayName: Build Stage
+
+ jobs:
+
+ - job: BuildJob
+   displayName: Maven Build
+
+   pool:
+     vmImage: $(vmImage)
+
+   steps:
+
+   - checkout: self
+     clean: true
+     fetchDepth: 0
+
+   - task: JavaToolInstaller@0
+     displayName: Install JDK
+
+     inputs:
+       versionSpec: $(jdkVersion)
+       jdkArchitectureOption: x64
+       jdkSourceOption: PreInstalled
+
+   - task: Cache@2
+     displayName: Cache Maven Repository
+
+     inputs:
+       key: 'maven | "$(Agent.OS)" | **/pom.xml'
+       restoreKeys: |
+         maven | "$(Agent.OS)"
+       path: $(HOME)/.m2/repository
+
+   - task: Maven@4
+     displayName: Clean Package
+
+     inputs:
+       mavenPomFile: $(mavenPomFile)
+       goals: clean package
+       publishJUnitResults: true
+       testResultsFiles: '**/surefire-reports/TEST-*.xml'
+       javaHomeOption: JDKVersion
+       jdkVersionOption: $(jdkVersion)
+       mavenVersionOption: Default
+       options: '-Dmaven.repo.local=$(HOME)/.m2/repository'
+
+   - task: PublishTestResults@2
+     displayName: Publish Unit Test Results
+
+     condition: succeededOrFailed()
+
+     inputs:
+       testResultsFormat: JUnit
+       testResultsFiles: '**/surefire-reports/TEST-*.xml'
+
+   - task: CopyFiles@2
+     displayName: Collect Build Artifact
+
+     inputs:
+       SourceFolder: '$(System.DefaultWorkingDirectory)'
+       Contents: |
+         **/target/*.jar
+       TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+   - task: PublishPipelineArtifact@1
+     displayName: Publish Pipeline Artifact
+
+     inputs:
+       targetPath: $(Build.ArtifactStagingDirectory)
+       artifact: $(artifactName)
+
+   # Optional
+   # Publish package into Azure Artifacts Maven Feed
+   - task: MavenAuthenticate@0
+     displayName: Authenticate Azure Artifacts
+
+     inputs:
+       artifactsFeeds: $(azureArtifactsFeed)
+
+   - task: Maven@4
+     displayName: Publish Package to Azure Artifacts
+
+     inputs:
+       mavenPomFile: $(mavenPomFile)
+       goals: deploy
+       javaHomeOption: JDKVersion
+       jdkVersionOption: $(jdkVersion)
+
+##############################################
+# DEPLOY STAGE
+##############################################
+
+- stage: Deploy
+
+ displayName: Deploy to Azure Web App
+
+ dependsOn: Build
+
+ condition: succeeded()
+
+ jobs:
+
+ - deployment: DeployWebApp
+
+   displayName: Deploy Application
+
+   environment: $(environmentName)
+
+   pool:
+     vmImage: $(vmImage)
+
+   strategy:
+
+     runOnce:
+
+       deploy:
+
+         steps:
+
+         - download: current
+           artifact: $(artifactName)
+
+         - task: AzureWebApp@1
+
+           displayName: Deploy to Azure Web App
+
+           inputs:
+             azureSubscription: $(azureSubscription)
+             appType: webAppLinux
+             appName: $(webAppName)
+             package: '$(Pipeline.Workspace)/$(artifactName)/**/*.jar'
